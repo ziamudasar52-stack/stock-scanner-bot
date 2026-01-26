@@ -135,10 +135,10 @@ def call_mboum(endpoint: str, params: dict | None = None) -> dict | list | None:
     Generic Mboum caller. Adjust base URL/headers if your account uses a different pattern.
     """
     url = f"https://mboum.com/api{endpoint}"
-    headers = {
-        "X-API-KEY": MBOUM_API_KEY,
-        "Accept": "application/json",
-    }
+headers = {
+    "Authorization": f"Bearer {MBOUM_API_KEY}",
+    "Accept": "application/json",
+}
 
     try:
         resp = requests.get(url, headers=headers, params=params, timeout=10)
@@ -484,3 +484,4 @@ def main_loop() -> None:
 if __name__ == "__main__":
     logger.info("BOT STARTING - DEBUG INFO")
     main_loop()
+
