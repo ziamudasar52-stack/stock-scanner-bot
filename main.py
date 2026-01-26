@@ -130,6 +130,10 @@ def call_mboum(endpoint, params=None):
             logger.error(f"❌ API Error 401: {resp.text}")
             return None
 
+        if resp.status_code == 422:
+            logger.error(f"❌ API Error 422: {resp.text}")
+            return None
+
         if not resp.ok:
             logger.error(f"❌ API Error {resp.status_code}: {resp.text}")
             return None
@@ -207,7 +211,15 @@ def extract_movers(data):
 
 def get_top_movers(limit=50):
     logger.info("🔍 Getting top movers...")
-    data = call_mboum("/v1/markets/movers", params={"limit": limit})
+
+    data = call_mboum(
+        "/v1/markets/movers",
+        params={
+            "type": "gainers",   # REQUIRED FIX
+            "limit": limit
+        }
+    )
+
     movers = extract_movers(data)
 
     if not movers:
