@@ -1,6 +1,5 @@
 import os
 import time
-import json
 import logging
 from datetime import datetime, time as dt_time
 from collections import defaultdict
@@ -12,7 +11,7 @@ from telegram import Bot, ParseMode
 from telegram.error import TelegramError
 
 # =========================
-# ENV VARS
+# ENV / CONSTANTS
 # =========================
 
 MBOUM_API_KEY = os.getenv("MBOUM_API_KEY")
@@ -20,14 +19,15 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 if not all([MBOUM_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
-    raise RuntimeError("Missing environment variables")
+    raise RuntimeError("Missing environment variables (MBOUM_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)")
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 EST = ZoneInfo("America/New_York")
 
-GAIN_THRESHOLD = 5.0  # % gain threshold for alerts
-VOLUME_SPIKE_MULTIPLIER = 2.0  # today > 2x yesterday
-HISTORY_RANGE = "5d"  # safety window for history
+GAIN_THRESHOLD = 5.0                 # % gain threshold for alerts
+VOLUME_SPIKE_MULTIPLIER = 2.0        # today > 2x yesterday
+HISTORY_RANGE = "5d"                 # safety window for history
+MOVER_TYPE = "STOCKS"                # movers universe
 
 last_seen_gainers = {}
 last_seen_volume_spikes = {}
@@ -43,16 +43,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 # =========================
 # TIME / MARKET
 # =========================
 
-def now_est():
+def now_est() -> datetime:
     return datetime.now(EST)
 
 
 def is_us_holiday(d: datetime) -> bool:
+    # simple fixed list; extend as needed
     holidays = {
         "2026-01-01",
         "2026-07-03",
@@ -76,7 +76,6 @@ def is_market_open(now: datetime | None = None) -> bool:
     end = dt_time(18, 0)
     return start <= now.time() <= end
 
-
 # =========================
 # TELEGRAM
 # =========================
@@ -97,7 +96,7 @@ def send_telegram(msg: str, mode: str | None = ParseMode.MARKDOWN):
 def send_startup_message():
     now = now_est()
     status = "OPEN" if is_market_open(now) else "CLOSED"
-    next_scan = "Now" if status == "OPEN" else "6 AM EST"
+    next_scan = "Now" if status == "OPEN" else "6:00 AM EST"
 
     msg = (
         "✅ *Bot started*\n"
@@ -111,7 +110,6 @@ def send_startup_message():
 def send_error_message(err: str):
     send_telegram(f"❌ *ERROR*\n`{err}`")
 
-
 # =========================
 # MBOUM CORE CALL
 # =========================
@@ -124,7 +122,7 @@ def call_mboum(endpoint: str, params: dict | None = None):
     }
 
     try:
-        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        resp = requests.get(url, headers=headers, params=params, timeout=20)
         logger.info(f"📡 API Response: {endpoint} - Status: {resp.status_code}")
 
         if not resp.ok:
@@ -136,23 +134,19 @@ def call_mboum(endpoint: str, params: dict | None = None):
         logger.error(f"Request error: {e}")
         return None
 
-
 # =========================
-# OVERVIEW (TOP GAINERS / MOST ACTIVE)
+# MOVERS (TOP GAINERS / MOST ACTIVE / DECLINERS)
 # =========================
 
-def get_overview():
-    data = call_mboum("/v1/markets/overview")
+def get_movers():
+    data = call_mboum("/v1/movers", params={"type": MOVER_TYPE})
     if not data or "body" not in data:
+        logger.warning("⚠️ No movers data")
         return None
     return data["body"]
 
 
-def parse_top_gainers(body: dict) -> list[dict]:
-    """
-    From MostAdvanced → table → rows
-    change = "+228.13%" style
-    """
+def parse_most_advanced(body: dict) -> list[dict]:
     try:
         rows = body["MostAdvanced"]["table"]["rows"]
     except Exception:
@@ -166,10 +160,12 @@ def parse_top_gainers(body: dict) -> list[dict]:
 
         price_str = r.get("lastSalePrice", "").replace("$", "").replace(",", "")
         change_pct_str = r.get("change", "").replace("%", "").replace("+", "").replace(",", "")
+
         try:
             price = float(price_str) if price_str else None
         except ValueError:
             price = None
+
         try:
             change_pct = float(change_pct_str) if change_pct_str else None
         except ValueError:
@@ -186,11 +182,7 @@ def parse_top_gainers(body: dict) -> list[dict]:
     return gainers
 
 
-def parse_most_active(body: dict) -> list[dict]:
-    """
-    From MostActiveByShareVolume → table → rows
-    change = "395,741,963" (volume)
-    """
+def parse_most_active_by_volume(body: dict) -> list[dict]:
     try:
         rows = body["MostActiveByShareVolume"]["table"]["rows"]
     except Exception:
@@ -204,10 +196,12 @@ def parse_most_active(body: dict) -> list[dict]:
 
         price_str = r.get("lastSalePrice", "").replace("$", "").replace(",", "")
         vol_str = r.get("change", "").replace(",", "")
+
         try:
             price = float(price_str) if price_str else None
         except ValueError:
             price = None
+
         try:
             volume = int(vol_str) if vol_str else None
         except ValueError:
@@ -223,15 +217,11 @@ def parse_most_active(body: dict) -> list[dict]:
         )
     return actives
 
-
 # =========================
 # HISTORY (TODAY VS YESTERDAY VOLUME)
 # =========================
 
 def get_symbol_history(symbol: str) -> dict | None:
-    """
-    Uses Mboum history endpoint (structure you sent).
-    """
     data = call_mboum("/v1/hi/history", params={"symbol": symbol, "interval": "5m", "range": HISTORY_RANGE})
     if not data or "body" not in data:
         return None
@@ -239,9 +229,6 @@ def get_symbol_history(symbol: str) -> dict | None:
 
 
 def get_today_yesterday_volume(symbol: str) -> tuple[int | None, int | None]:
-    """
-    Sum intraday volume by date, return (today_total, yesterday_total).
-    """
     body = get_symbol_history(symbol)
     if not body:
         return None, None
@@ -261,7 +248,6 @@ def get_today_yesterday_volume(symbol: str) -> tuple[int | None, int | None]:
     if not volumes_by_date:
         return None, None
 
-    # sort dates
     dates = sorted(volumes_by_date.keys())
     if len(dates) < 2:
         return None, None
@@ -270,7 +256,6 @@ def get_today_yesterday_volume(symbol: str) -> tuple[int | None, int | None]:
     yesterday = dates[-2]
     return volumes_by_date[today], volumes_by_date[yesterday]
 
-
 # =========================
 # UNUSUAL OPTIONS
 # =========================
@@ -278,16 +263,15 @@ def get_today_yesterday_volume(symbol: str) -> tuple[int | None, int | None]:
 def get_unusual_options() -> list[dict]:
     data = call_mboum("/v1/options/unusual-activity")
     if not data or "body" not in data:
+        logger.warning("⚠️ No unusual options data")
         return []
     body = data["body"]
     if not isinstance(body, list):
         return []
-
-    return body  # alert on ALL, per your choice
-
+    return body  # alert on ALL contracts
 
 # =========================
-# ALERT LOGIC
+# ALERT FORMATTING
 # =========================
 
 def format_gainer_line(m: dict) -> str:
@@ -326,6 +310,9 @@ def format_unusual_line(c: dict) -> str:
         f"Last: {last} | Vol: {vol} | OI: {oi} | V/OI: {vor} | Δ: {delta}"
     )
 
+# =========================
+# ALERT LOGIC
+# =========================
 
 def check_gain_threshold(gainers: list[dict]) -> list[dict]:
     alerts = []
@@ -371,7 +358,6 @@ def check_unusual_options(contracts: list[dict]) -> list[dict]:
         alerts.append(c)
     return alerts
 
-
 # =========================
 # JOBS
 # =========================
@@ -382,13 +368,14 @@ def scan_main_job():
         logger.info("⏸ Market closed, skipping main scan")
         return
 
-    body = get_overview()
-    if not body:
-        logger.warning("⚠️ No overview data")
+    logger.info("🔍 Running main scan (movers + unusual options)...")
+
+    movers_body = get_movers()
+    if not movers_body:
         return
 
-    gainers = parse_top_gainers(body)
-    actives = parse_most_active(body)
+    gainers = parse_most_advanced(movers_body)
+    actives = parse_most_active_by_volume(movers_body)
     unusual = get_unusual_options()
 
     # Gain threshold alerts
@@ -422,16 +409,16 @@ def top_10_gainers_job():
         logger.info("⏸ Market closed, skipping top 10 gainers")
         return
 
-    body = get_overview()
-    if not body:
-        logger.warning("⚠️ No overview data for top 10")
+    logger.info("🔍 Getting top 10 gainers...")
+
+    movers_body = get_movers()
+    if not movers_body:
         return
 
-    gainers = parse_top_gainers(body)
+    gainers = parse_most_advanced(movers_body)
     if not gainers:
         return
 
-    # sort by change_percent desc
     gainers = sorted(
         gainers,
         key=lambda x: x["change_percent"] if x["change_percent"] is not None else 0,
@@ -439,11 +426,10 @@ def top_10_gainers_job():
     )
     top10 = gainers[:10]
 
-    msg = "🏆 *Top 10 Gainers*\n" + "\n".join(
+    msg = "🏆 *Top 10 Gainers (STOCKS)*\n" + "\n".join(
         f"- {format_gainer_line(g)}" for g in top10
     )
     send_telegram(msg)
-
 
 # =========================
 # SCHEDULER / MAIN LOOP
