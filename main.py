@@ -2,7 +2,7 @@ import os
 import time
 import logging
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 # ================== CONFIG ==================
@@ -13,12 +13,13 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 BASE_URL = "https://mboum.com/api/v1"
 
 # Original timing from your base logic
-MAIN_SCAN_INTERVAL_SECONDS = 10        # continuous scanner
-TOP10_INTERVAL_SECONDS = 300           # 5 minutes
-UNUSUAL_OPTIONS_INTERVAL_SECONDS = 120 # 2 minutes
-WATCHLIST_INTERVAL_SECONDS = 30        # 30 seconds
-MARKET_STATUS_INTERVAL_SECONDS = 1800  # 30 minutes
-DARK_POOL_INTERVAL_SECONDS = 120       # 2 minutes (additional feature)
+MAIN_SCAN_INTERVAL_SECONDS = 10         # continuous scanner
+TOP10_INTERVAL_SECONDS = 300            # 5 minutes
+UNUSUAL_OPTIONS_INTERVAL_SECONDS = 120  # 2 minutes
+WATCHLIST_INTERVAL_SECONDS = 30         # 30 seconds
+MARKET_STATUS_INTERVAL_SECONDS = 1800   # 30 minutes
+DARK_POOL_INTERVAL_SECONDS = 120        # 2 minutes (additional feature)
+GAPUP_INTERVAL_SECONDS = 120            # 2 minutes (Gap-Up Alerts moved here)
 
 # Thresholds
 VOLUME_SPIKE_RATIO = 2.0
@@ -438,11 +439,6 @@ def run_main_scanner() -> None:
         if sym in watchlist or vol_msg or unusual_msg:
             watchlist.setdefault(sym, {"reason": "activity"})
 
-    # Gap-up alerts (additional feature)
-    gap_msg = format_gap_up_alerts(gainers)
-    if gap_msg:
-        send_telegram_message(gap_msg)
-
     # Premarket & after-hours (additional feature) using quotes for top symbols
     symbols = [g.get("symbol") for g in gainers[:20] if g.get("symbol")]
     if symbols:
@@ -501,6 +497,16 @@ def run_dark_pool_task() -> None:
     if msg:
         send_telegram_message(msg)
 
+# ================== GAP-UP TASK (EVERY 2m, MOVED OUT OF 10s LOOP) ==================
+def run_gapup_task() -> None:
+    logging.info("🔍 GAP-UP TASK: every 2 minutes...")
+    gainers = get_screener_day_gainers()
+    if not gainers:
+        return
+    gap_msg = format_gap_up_alerts(gainers)
+    if gap_msg:
+        send_telegram_message(gap_msg)
+
 # ================== ENTRYPOINT LOOP ==================
 if __name__ == "__main__":
     if not MBOUM_API_KEY:
@@ -522,6 +528,7 @@ if __name__ == "__main__":
     last_watchlist = datetime.min.replace(tzinfo=tz_est)
     last_market_status = datetime.min.replace(tzinfo=tz_est)
     last_dark_pool = datetime.min.replace(tzinfo=tz_est)
+    last_gapup = datetime.min.replace(tzinfo=tz_est)
 
     while True:
         now_est = datetime.now(tz_est)
@@ -556,9 +563,14 @@ if __name__ == "__main__":
             last_market_status = now_est
             run_market_status_task(now_est)
 
-        # DARK POOL SPY every 2 minutes (additional feature)
+        # DARK POOL SPY every 2 minutes
         if (now_est - last_dark_pool).total_seconds() >= DARK_POOL_INTERVAL_SECONDS:
             last_dark_pool = now_est
             run_dark_pool_task()
+
+        # GAP-UP ALERTS every 2 minutes (moved out of 10s loop)
+        if (now_est - last_gapup).total_seconds() >= GAPUP_INTERVAL_SECONDS:
+            last_gapup = now_est
+            run_gapup_task()
 
         time.sleep(1)
