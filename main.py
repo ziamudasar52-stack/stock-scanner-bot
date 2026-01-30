@@ -2,26 +2,24 @@ import os
 import time
 import logging
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-# ================== CONFIG ==================
+# ============== CONFIG ==============
 MBOUM_API_KEY = os.getenv("MBOUM_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-BASE_URL = "https://mboum.com/api/v1"
+BASE_URL = "https://api.mboum.com/v1"
 
-# Original timing from your base logic
-MAIN_SCAN_INTERVAL_SECONDS = 10         # continuous scanner
-TOP10_INTERVAL_SECONDS = 300            # 5 minutes
-UNUSUAL_OPTIONS_INTERVAL_SECONDS = 120  # 2 minutes
-WATCHLIST_INTERVAL_SECONDS = 30         # 30 seconds
-MARKET_STATUS_INTERVAL_SECONDS = 1800   # 30 minutes
-DARK_POOL_INTERVAL_SECONDS = 120        # 2 minutes (additional feature)
-GAPUP_INTERVAL_SECONDS = 120            # 2 minutes (Gap-Up Alerts moved here)
+MAIN_SCAN_INTERVAL_SECONDS = 10
+TOP10_INTERVAL_SECONDS = 300
+UNUSUAL_OPTIONS_INTERVAL_SECONDS = 120
+WATCHLIST_INTERVAL_SECONDS = 30
+MARKET_STATUS_INTERVAL_SECONDS = 1800
+DARK_POOL_INTERVAL_SECONDS = 120
+GAPUP_INTERVAL_SECONDS = 120
 
-# Thresholds
 VOLUME_SPIKE_RATIO = 2.0
 PCT_CHANGE_THRESHOLD = 5.0
 LARGE_SALE_VOLUME_DELTA = 10000
@@ -31,13 +29,12 @@ GAP_UP_THRESHOLD = 5.0
 PREMARKET_GAP_THRESHOLD = 3.0
 AFTER_HOURS_MOVE_THRESHOLD = 3.0
 
-# ================== LOGGING ==================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# ================== TELEGRAM ==================
+# ============== TELEGRAM ==============
 def send_telegram_message(text: str) -> None:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logging.warning("Telegram credentials missing; skipping send.")
@@ -55,14 +52,16 @@ def send_telegram_message(text: str) -> None:
     except Exception as e:
         logging.error(f"Telegram send exception: {e}")
 
-# ================== HTTP HELPERS ==================
+# ============== MBOUM HTTP HELPER ==============
 def mboum_get(path: str, params: dict | None = None) -> dict | None:
     if params is None:
         params = {}
-    params["apikey"] = MBOUM_API_KEY
     url = f"{BASE_URL}{path}"
+    headers = {
+        "Authorization": f"Bearer {MBOUM_API_KEY}"
+    }
     try:
-        resp = requests.get(url, params=params, timeout=15)
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
         logging.info(f"📡 API Response: {path} - Status: {resp.status_code}")
         if resp.status_code != 200:
             logging.error(f"❌ API Error {resp.status_code}: {resp.text}")
@@ -72,51 +71,38 @@ def mboum_get(path: str, params: dict | None = None) -> dict | None:
         logging.error(f"❌ API Exception for {path}: {e}")
         return None
 
-# ================== DATA FETCHERS ==================
+# ============== DATA FETCHERS ==============
 def get_screener_day_gainers() -> list:
-    logging.info("🔍 Getting day_gainers screener...")
     data = mboum_get("/markets/screener", {"list": "day_gainers"})
-    if not data or "body" not in data:
-        logging.warning("⚠️ No screener data")
+    if not data:
         return []
-    return data["body"]
+    return data
 
-def get_markets_movers() -> dict:
-    logging.info("🔍 Getting markets movers...")
-    data = mboum_get("/markets/movers")
-    if not data or "body" not in data:
-        logging.warning("⚠️ No movers data")
-        return {}
-    return data["body"]
+def get_markets_movers() -> list:
+    data = mboum_get("/markets/movers", {"type": "ETF"})
+    if not data:
+        return []
+    return data
 
 def get_unusual_options_activity() -> list:
-    logging.info("🔍 Getting unusual options activity...")
-    data = mboum_get("/markets/options/unusual-options-activity")
-    if not data or "body" not in data:
-        logging.warning("⚠️ No unusual options data")
+    data = mboum_get("/markets/options/unusual-options-activity", {
+        "type": "STOCKS",
+        "page": "1"
+    })
+    if not data:
         return []
-    return data["body"]
+    return data
 
 def get_quotes(symbols: list[str]) -> list:
     if not symbols:
         return []
-    sym_str = ",".join(sorted(set(symbols)))
-    logging.info(f"🔍 Getting quotes for: {sym_str}")
-    data = mboum_get("/qu/quote", {"symbol": sym_str})
-    if not data or "body" not in data:
-        logging.warning("⚠️ No quote data")
+    tickers = ",".join(sorted(set(symbols)))
+    data = mboum_get("/markets/stock/quotes", {"ticker": tickers})
+    if not data:
         return []
-    return data["body"]
+    return data
 
-def get_dark_pool_spy() -> list:
-    logging.info("🔍 Getting dark pool prints for SPY...")
-    data = mboum_get("/markets/dark-pools", {"symbol": "SPY"})
-    if not data or "body" not in data:
-        logging.warning("⚠️ No dark pool data (SPY) or endpoint not available")
-        return []
-    return data["body"]
-
-# ================== ANALYTICS HELPERS ==================
+# ============== ANALYTICS / FORMATTERS ==============
 def compute_trend_label(quote: dict) -> str:
     price = quote.get("regularMarketPrice")
     fifty = quote.get("fiftyDayAverage")
@@ -138,7 +124,6 @@ def compute_sentiment_score(quote: dict, extra_weight: float = 0.0) -> str:
     vol = quote.get("regularMarketVolume", 0.0) or 0.0
     avg3m = quote.get("averageDailyVolume3Month", 0.0) or 1.0
     vol_ratio = vol / avg3m if avg3m > 0 else 1.0
-
     score = pct * 0.6 + (vol_ratio - 1.0) * 20 * 0.3 + extra_weight
     if score >= 15:
         label = "🔥 Very Bullish"
@@ -152,20 +137,12 @@ def compute_sentiment_score(quote: dict, extra_weight: float = 0.0) -> str:
         label = "😐 Neutral"
     return f"Sentiment: {label} (score {score:.1f})"
 
-def format_price(v) -> str:
-    try:
-        return f"{float(v):.2f}"
-    except Exception:
-        return str(v)
-
-# ================== FORMATTERS ==================
 def format_top_gainers(gainers: list) -> str:
     sorted_g = sorted(
         gainers,
         key=lambda x: x.get("regularMarketChangePercent", 0.0) or 0.0,
         reverse=True
     )[:10]
-
     lines = ["🏆 *Top 10 Gainers (Screener)*"]
     for g in sorted_g:
         sym = g.get("symbol", "N/A")
@@ -193,11 +170,9 @@ def format_unusual_options(options_list: list) -> str:
             continue
         if vol_oi >= UNUSUAL_OPTIONS_VOL_OI_MIN and vol >= UNUSUAL_OPTIONS_VOLUME_MIN:
             filtered.append(opt)
-
     filtered = filtered[:10]
     if not filtered:
         return "📉 No strong unusual options sweeps found."
-
     lines = ["⚡ *Unusual Options Activity (Sweeps)*"]
     for opt in filtered:
         base = opt.get("baseSymbol")
@@ -213,10 +188,9 @@ def format_unusual_options(options_list: list) -> str:
         vol_oi = opt.get("volumeOpenInterestRatio")
         iv = opt.get("volatility")
         delta = opt.get("delta")
-
         lines.append(
             f"\n*{base}* {typ} {strike} exp {exp} ({dte} DTE)\n"
-            f"Bid/Mid/Ask: {bid}/{opt.get('midpoint')}/{ask} | Last: {last}\n"
+            f"Bid/Ask: {bid}/{ask} | Last: {last}\n"
             f"Vol: {vol} | OI: {oi} | Vol/OI: {vol_oi}\n"
             f"IV: {iv} | Δ: {delta}"
         )
@@ -244,12 +218,17 @@ def format_gap_up_alerts(gainers: list) -> str | None:
         return None
     return "\n".join(lines)
 
+def format_price(v) -> str:
+    try:
+        return f"{float(v):.2f}"
+    except Exception:
+        return str(v)
+
 def format_premarket_and_afterhours(quotes: list) -> str | None:
     pre_lines = ["🌅 *Premarket Gap Scan*"]
     post_lines = ["🌙 *After-hours Movers*"]
     pre_count = 0
     post_count = 0
-
     for q in quotes:
         sym = q.get("symbol", "N/A")
         name = q.get("shortName") or q.get("displayName") or q.get("longName") or "N/A"
@@ -258,44 +237,28 @@ def format_premarket_and_afterhours(quotes: list) -> str | None:
         pre_pct = q.get("preMarketChangePercent")
         post_price = q.get("postMarketPrice")
         post_pct = q.get("postMarketChangePercent")
-
         if pre_pct is not None and abs(pre_pct) >= PREMARKET_GAP_THRESHOLD:
             pre_lines.append(
                 f"\n*{sym}* — {name}\n"
                 f"Premkt: ${format_price(pre_price)} | Reg: ${format_price(reg_price)} | Δ: {pre_pct:.2f}%"
             )
             pre_count += 1
-
         if post_pct is not None and abs(post_pct) >= AFTER_HOURS_MOVE_THRESHOLD:
             post_lines.append(
                 f"\n*{sym}* — {name}\n"
                 f"After-hours: ${format_price(post_price)} | Reg: ${format_price(reg_price)} | Δ: {post_pct:.2f}%"
             )
             post_count += 1
-
     parts = []
     if pre_count > 0:
         parts.append("\n".join(pre_lines))
     if post_count > 0:
         parts.append("\n".join(post_lines))
-
     if not parts:
         return None
     return "\n\n".join(parts)
 
-def format_dark_pool_spy(dark_list: list) -> str | None:
-    if not dark_list:
-        return None
-    lines = ["🕳️ *Dark Pool Prints — SPY*"]
-    for dp in dark_list:
-        price = dp.get("price") or dp.get("lastPrice") or "N/A"
-        size = dp.get("size") or dp.get("volume") or "N/A"
-        venue = dp.get("venue") or dp.get("exchange") or "N/A"
-        ts = dp.get("time") or dp.get("timestamp") or "N/A"
-        lines.append(f"Price: {price} | Size: {size} | Venue: {venue} | Time: {ts}")
-    return "\n".join(lines)
-
-# ================== STATE (DEDUP + WATCHLIST) ==================
+# ============== STATE ==============
 last_volume_spike_alert: dict[str, bool] = {}
 last_bid_exact_alert: dict[str, bool] = {}
 last_bid_highvalue_alert: dict[str, bool] = {}
@@ -304,18 +267,14 @@ last_halt_alert: dict[str, bool] = {}
 watchlist: dict[str, dict] = {}
 last_watchlist_volume: dict[str, int] = {}
 
-# ================== CORE LOGIC HELPERS ==================
+# ============== CORE LOGIC ==============
 def is_trading_day(now_est: datetime) -> bool:
-    if now_est.weekday() >= 5:
-        return False
-    return True  # holiday logic could be added here
+    return now_est.weekday() < 5
 
 def is_within_trading_window(now_est: datetime) -> bool:
-    hour = now_est.hour
-    minute = now_est.minute
-    start = 6 * 60  # 6:00
-    end = 18 * 60   # 18:00
-    current = hour * 60 + minute
+    start = 6 * 60
+    end = 18 * 60
+    current = now_est.hour * 60 + now_est.minute
     return start <= current <= end
 
 def check_volume_spike(sym: str, stock: dict) -> str | None:
@@ -339,23 +298,18 @@ def check_bid_patterns(sym: str, stock: dict) -> list[str]:
     bid_size = stock.get("bidSize")
     if bid is None or bid_size is None:
         return alerts
-
-    # Pattern 1: EXACT $199,999 with 100 shares
     if abs(bid - 199999.0) < 0.01 and bid_size == 100 and not last_bid_exact_alert.get(sym, False):
         last_bid_exact_alert[sym] = True
         alerts.append(
             f"🎯 *BID MATCH (EXACT)* — {sym}\n"
             f"Bid: ${bid:,.2f} | Size: {bid_size}"
         )
-
-    # Pattern 2: HIGH VALUE bid ≥ $2,000 with size ≥ 20
     if bid >= 2000.0 and bid_size >= 20 and not last_bid_highvalue_alert.get(sym, False):
         last_bid_highvalue_alert[sym] = True
         alerts.append(
             f"💰 *BID MATCH (HIGH VALUE)* — {sym}\n"
             f"Bid: ${bid:,.2f} | Size: {bid_size}"
         )
-
     return alerts
 
 def check_unusual_activity(sym: str, stock: dict) -> str | None:
@@ -399,47 +353,33 @@ def update_watchlist_volume(sym: str, stock: dict) -> str | None:
         )
     return None
 
-# ================== MAIN SCAN (EVERY 10s) ==================
+# ============== TASKS ==============
 def run_main_scanner() -> None:
-    logging.info("🔍 MAIN SCANNER: screener + bid/volume/5%/halts + extras...")
+    logging.info("🔍 MAIN SCANNER...")
     gainers = get_screener_day_gainers()
     if not gainers:
         logging.warning("⚠️ No screener data in main scanner.")
         return
-
-    # Process each stock in screener
     for stock in gainers:
         sym = stock.get("symbol")
         if not sym:
             continue
-
-        # 1) Volume spike
         vol_msg = check_volume_spike(sym, stock)
         if vol_msg:
             send_telegram_message(vol_msg)
-
-        # 2) 5%+ move → bid pattern check
         pct = stock.get("regularMarketChangePercent", 0.0) or 0.0
         if pct >= PCT_CHANGE_THRESHOLD:
             bid_alerts = check_bid_patterns(sym, stock)
             for msg in bid_alerts:
                 send_telegram_message(msg)
-
-        # 3) No pattern → unusual activity check
         unusual_msg = check_unusual_activity(sym, stock)
         if unusual_msg:
             send_telegram_message(unusual_msg)
-
-        # 4) Halt detection
         halt_msg = check_halt(sym, stock)
         if halt_msg:
             send_telegram_message(halt_msg)
-
-        # 5) Add to watchlist if flagged by any condition
         if sym in watchlist or vol_msg or unusual_msg:
             watchlist.setdefault(sym, {"reason": "activity"})
-
-    # Premarket & after-hours (additional feature) using quotes for top symbols
     symbols = [g.get("symbol") for g in gainers[:20] if g.get("symbol")]
     if symbols:
         quotes = get_quotes(symbols)
@@ -447,16 +387,14 @@ def run_main_scanner() -> None:
         if pa_msg:
             send_telegram_message(pa_msg)
 
-# ================== TOP 10 GAINERS (EVERY 5m) ==================
 def run_top10_task() -> None:
-    logging.info("🔍 TOP 10 TASK: screener day_gainers...")
+    logging.info("🔍 TOP 10 TASK...")
     gainers = get_screener_day_gainers()
     if not gainers:
         return
     msg = format_top_gainers(gainers)
     send_telegram_message(msg)
 
-# ================== UNUSUAL OPTIONS (EVERY 2m) ==================
 def run_unusual_options_task() -> None:
     logging.info("🔍 UNUSUAL OPTIONS TASK...")
     opts = get_unusual_options_activity()
@@ -465,11 +403,10 @@ def run_unusual_options_task() -> None:
     msg = format_unusual_options(opts)
     send_telegram_message(msg)
 
-# ================== WATCHLIST MONITOR (EVERY 30s) ==================
 def run_watchlist_task() -> None:
     if not watchlist:
         return
-    logging.info("🔍 WATCHLIST TASK: monitoring large sales...")
+    logging.info("🔍 WATCHLIST TASK...")
     symbols = list(watchlist.keys())
     quotes = get_quotes(symbols)
     if not quotes:
@@ -482,24 +419,18 @@ def run_watchlist_task() -> None:
         if msg:
             send_telegram_message(msg)
 
-# ================== MARKET STATUS (EVERY 30m) ==================
 def run_market_status_task(now_est: datetime) -> None:
     logging.info("🔍 MARKET STATUS TASK...")
     status = "OPEN" if is_trading_day(now_est) and is_within_trading_window(now_est) else "CLOSED"
     msg = f"🕒 *Market Status Check*\nStatus: {status}\nTime: {now_est.strftime('%Y-%m-%d %H:%M:%S %Z')}"
     send_telegram_message(msg)
 
-# ================== DARK POOL SPY (EVERY 2m, ADDITIONAL) ==================
 def run_dark_pool_task() -> None:
-    logging.info("🔍 DARK POOL TASK: SPY...")
-    dark = get_dark_pool_spy()
-    msg = format_dark_pool_spy(dark)
-    if msg:
-        send_telegram_message(msg)
+    # Placeholder if you later add a dark pool endpoint
+    logging.info("🔍 DARK POOL TASK (no-op placeholder)...")
 
-# ================== GAP-UP TASK (EVERY 2m, MOVED OUT OF 10s LOOP) ==================
 def run_gapup_task() -> None:
-    logging.info("🔍 GAP-UP TASK: every 2 minutes...")
+    logging.info("🔍 GAP-UP TASK (every 2 minutes)...")
     gainers = get_screener_day_gainers()
     if not gainers:
         return
@@ -507,17 +438,15 @@ def run_gapup_task() -> None:
     if gap_msg:
         send_telegram_message(gap_msg)
 
-# ================== ENTRYPOINT LOOP ==================
+# ============== MAIN LOOP ==============
 if __name__ == "__main__":
     if not MBOUM_API_KEY:
         logging.error("MBOUM_API_KEY is not set. Exiting.")
         raise SystemExit(1)
 
-    logging.info("🤖 Stock scanner bot starting with original timing logic...")
-
+    logging.info("🤖 Stock scanner bot starting...")
     tz_est = ZoneInfo("America/New_York")
 
-    # Startup message at 6:00 AM EST (if within window, send immediately once)
     now_est = datetime.now(tz_est)
     if is_trading_day(now_est) and is_within_trading_window(now_est) and now_est.hour == 6:
         send_telegram_message("🌅 Good Morning, it's 6am — Bot is running now.")
@@ -533,42 +462,34 @@ if __name__ == "__main__":
     while True:
         now_est = datetime.now(tz_est)
 
-        # Stop all scanning after 6 PM EST until next trading day
         if not is_trading_day(now_est) or not is_within_trading_window(now_est):
             time.sleep(5)
             continue
 
-        # MAIN SCANNER every 10 seconds
         if (now_est - last_main_scan).total_seconds() >= MAIN_SCAN_INTERVAL_SECONDS:
             last_main_scan = now_est
             run_main_scanner()
 
-        # TOP 10 every 5 minutes
         if (now_est - last_top10).total_seconds() >= TOP10_INTERVAL_SECONDS:
             last_top10 = now_est
             run_top10_task()
 
-        # UNUSUAL OPTIONS every 2 minutes
         if (now_est - last_unusual).total_seconds() >= UNUSUAL_OPTIONS_INTERVAL_SECONDS:
             last_unusual = now_est
             run_unusual_options_task()
 
-        # WATCHLIST every 30 seconds
         if (now_est - last_watchlist).total_seconds() >= WATCHLIST_INTERVAL_SECONDS:
             last_watchlist = now_est
             run_watchlist_task()
 
-        # MARKET STATUS every 30 minutes
         if (now_est - last_market_status).total_seconds() >= MARKET_STATUS_INTERVAL_SECONDS:
             last_market_status = now_est
             run_market_status_task(now_est)
 
-        # DARK POOL SPY every 2 minutes
         if (now_est - last_dark_pool).total_seconds() >= DARK_POOL_INTERVAL_SECONDS:
             last_dark_pool = now_est
             run_dark_pool_task()
 
-        # GAP-UP ALERTS every 2 minutes (moved out of 10s loop)
         if (now_est - last_gapup).total_seconds() >= GAPUP_INTERVAL_SECONDS:
             last_gapup = now_est
             run_gapup_task()
