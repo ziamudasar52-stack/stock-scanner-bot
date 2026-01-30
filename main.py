@@ -2,7 +2,7 @@ import os
 import time
 import logging
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 # ============== CONFIG ==============
@@ -53,7 +53,7 @@ def send_telegram_message(text: str) -> None:
         logging.error(f"Telegram send exception: {e}")
 
 # ============== MBOUM HTTP HELPER ==============
-def mboum_get(path: str, params: dict | None = None) -> dict | None:
+def mboum_get(path: str, params: dict | None = None):
     if params is None:
         params = {}
     url = f"{BASE_URL}{path}"
@@ -71,36 +71,36 @@ def mboum_get(path: str, params: dict | None = None) -> dict | None:
         logging.error(f"❌ API Exception for {path}: {e}")
         return None
 
+# ============== SAFE LIST NORMALIZER ==============
+def ensure_list_of_dicts(data) -> list:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict) and "body" in data and isinstance(data["body"], list):
+        return [item for item in data["body"] if isinstance(item, dict)]
+    return []
+
 # ============== DATA FETCHERS ==============
 def get_screener_day_gainers() -> list:
     data = mboum_get("/markets/screener", {"list": "day_gainers"})
-    if not data:
-        return []
-    return data
+    return ensure_list_of_dicts(data) if data is not None else []
 
 def get_markets_movers() -> list:
     data = mboum_get("/markets/movers", {"type": "ETF"})
-    if not data:
-        return []
-    return data
+    return ensure_list_of_dicts(data) if data is not None else []
 
 def get_unusual_options_activity() -> list:
     data = mboum_get("/markets/options/unusual-options-activity", {
         "type": "STOCKS",
         "page": "1"
     })
-    if not data:
-        return []
-    return data
+    return ensure_list_of_dicts(data) if data is not None else []
 
 def get_quotes(symbols: list[str]) -> list:
     if not symbols:
         return []
     tickers = ",".join(sorted(set(symbols)))
     data = mboum_get("/markets/stock/quotes", {"ticker": tickers})
-    if not data:
-        return []
-    return data
+    return ensure_list_of_dicts(data) if data is not None else []
 
 # ============== ANALYTICS / FORMATTERS ==============
 def compute_trend_label(quote: dict) -> str:
@@ -152,6 +152,8 @@ def format_top_gainers(gainers: list) -> str:
         vol = g.get("regularMarketVolume", 0)
         trend = compute_trend_label(g)
         sentiment = compute_sentiment_score(g)
+        if price is None:
+            continue
         lines.append(
             f"\n*{sym}* — {name}\n"
             f"Price: ${price:.2f}  |  Change: {pct:.2f}%  |  Vol: {vol:,}\n"
@@ -361,6 +363,8 @@ def run_main_scanner() -> None:
         logging.warning("⚠️ No screener data in main scanner.")
         return
     for stock in gainers:
+        if not isinstance(stock, dict):
+            continue
         sym = stock.get("symbol")
         if not sym:
             continue
@@ -380,7 +384,8 @@ def run_main_scanner() -> None:
             send_telegram_message(halt_msg)
         if sym in watchlist or vol_msg or unusual_msg:
             watchlist.setdefault(sym, {"reason": "activity"})
-    symbols = [g.get("symbol") for g in gainers[:20] if g.get("symbol")]
+    symbols = [g.get("symbol") for g in gainers if isinstance(g, dict) and g.get("symbol")]
+    symbols = symbols[:20]
     if symbols:
         quotes = get_quotes(symbols)
         pa_msg = format_premarket_and_afterhours(quotes)
@@ -412,6 +417,8 @@ def run_watchlist_task() -> None:
     if not quotes:
         return
     for q in quotes:
+        if not isinstance(q, dict):
+            continue
         sym = q.get("symbol")
         if not sym:
             continue
@@ -426,8 +433,7 @@ def run_market_status_task(now_est: datetime) -> None:
     send_telegram_message(msg)
 
 def run_dark_pool_task() -> None:
-    # Placeholder if you later add a dark pool endpoint
-    logging.info("🔍 DARK POOL TASK (no-op placeholder)...")
+    logging.info("🔍 DARK POOL TASK (placeholder, no endpoint configured)...")
 
 def run_gapup_task() -> None:
     logging.info("🔍 GAP-UP TASK (every 2 minutes)...")
